@@ -6,6 +6,9 @@ name = "pypi"
 [packages]
 requests = "*"
 python-dotenv = "*"
+paramiko = "*"
+linode-api4 = "*"
+schedule = "*"
 
 [dev-packages]
 
