@@ -24,7 +24,6 @@ linode_client = linode_api4.LinodeClient(LINODE_TOKEN)
 
 
 def get_server():
-    print(linode_client.linode.instances(linode_api4.Instance.label == LINODE_LABEL)[0])
     return linode_client.linode.instances(linode_api4.Instance.label == LINODE_LABEL)[0]
 
 def send_notification(msg):
@@ -81,11 +80,26 @@ def restart_server_and_container():
     restart_container(server.ipv4[0])
     print("Application has been restarted")
 
+def reboot_or_alert():
+    try:
+        restart_server_and_container()
+    except RuntimeError as ex:
+        print(f"Application still down after reboot: {ex}")
+        send_notification("Subject: MANUAL ACTION NEEDED\nThe application is still down after a server reboot.")
+        
+def restart_container_or_reboot(ip):
+    try:
+        restart_container(ip, attempts=6)
+        print("Application restarted")
+    except RuntimeError as ex:
+        print(f"Container restart failed ({ex}), rebooting the server")
+        reboot_or_alert()
+    
 
 def monitor_application():
     server_ip = get_server().ipv4[0]
     try:
-        response = requests.get(f'http://{server_ip}:{APP_PORT}')
+        response = requests.get(f'http://{server_ip}:{APP_PORT}', timeout=10)
 
         if response.status_code == 200:
             print("Application is running successfully!")
@@ -93,26 +107,37 @@ def monitor_application():
             print("Application is down, fix it!")
             
             # send email to me
-            msg = "Subject: APPLICATION IS DOWN\nThe application returned status code {response.status_code}, fix ASAP!"
+            msg = f"Subject: APPLICATION IS DOWN\nThe application returned status code {response.status_code}, fix ASAP!"
             print("Sending email notification...")
             send_notification(msg)
             
             print("Restarting the app's container...")
-            restart_container(server_ip)
-            print("Application restarted")
             
-    except Exception as ex:
-        print(f"Connection error happened: {ex}")
-        msg = "Subject: SITE IS DOWN\nThe application is not accessible at all, fix ASAP!"
-        
+            restart_container_or_reboot(server_ip)
+            
+    # ConnectTimeout is a subclass of ConnectionError, so it must be caught first
+    except requests.exceptions.ConnectTimeout as ex:
+        print(f"Server is not responding: {ex}")
+        msg = "Subject: SITE IS DOWN\nThe server is not responding at all, fix ASAP!"
+
         print("Sending email notification...")
         send_notification(msg)
 
         # restart linode server
-        restart_server_and_container()
+        reboot_or_alert()
+
+    except requests.exceptions.ConnectionError as ex:
+        print(f"Server is up but the application refused the connection: {ex}")
+        msg = "Subject: APPLICATION IS DOWN\nThe server is up but the application is not running, fix ASAP!"
+
+        print("Sending email notification...")
+        send_notification(msg)
+
+        print("Restarting the app's container...")
+        restart_container_or_reboot(server_ip)
         
-# schedule.every(2).day.at("00:00", "Europe/Warsaw").do(monitor_application)
-schedule.every(2).minutes.do(monitor_application)
+schedule.every(2).day.at("00:00", "Europe/Warsaw").do(monitor_application)
+# schedule.every(2).minutes.do(monitor_application)
 
 while True:
     schedule.run_pending()

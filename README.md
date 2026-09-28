@@ -1,4 +1,4 @@
-# Monitor Website with Logic in Python Script
+# Monitoring Website on Linode with Python
 
 A Python script that checks whether a web application running in a Docker container on a Linode server is up, emails you when it isn't, and tries to bring it back automatically.
 
@@ -9,17 +9,39 @@ On a schedule, the script looks up the server's public IP address through the Li
 | Result | What the script does |
 | --- | --- |
 | Status `200` | Logs that the application is running. |
-| Any other status code | Sends an email alert, then SSHes into the server and runs `docker start` on the application's container. |
-| No response at all (connection refused, connection error, etc.) | Sends an email alert, reboots the server through the Linode API, waits for it to come back, then SSHes in and runs `docker start` on the container. |
+| Any other status code | The application answered with an error. Sends an "APPLICATION IS DOWN" email, then restarts the container. If that fails, reboots the server. |
+| Connection refused | The server is up but nothing is listening on the port, which usually means the container is stopped. Sends an "APPLICATION IS DOWN" email, then restarts the container. If that fails, reboots the server. |
+| No response within 10 seconds | The server itself is down or unreachable. Sends a "SITE IS DOWN" email, then reboots the server. |
+
+If the application is still down after a reboot, the script sends a "MANUAL ACTION NEEDED" email and keeps running, so the next scheduled check tries again.
+
+```
+app down    ──► restart container ──► fixed
+                      │ fails
+                      ▼
+server down ──► reboot server, then restart container ──► fixed
+                      │ fails
+                      ▼
+               "MANUAL ACTION NEEDED" email
+```
 
 ### Restarting the container
 
 A booting server often accepts SSH connections before Docker is ready, so the container restart retries each step:
 
-1. **Connect over SSH.** Up to 12 attempts, 10 seconds apart.
-2. **Run `docker start <CONTAINER_NAME>`.** The script checks the command's exit status and retries up to 12 times, 10 seconds apart, printing Docker's error each time.
+1. **Connect over SSH.** Each attempt waits up to 10 seconds to connect, with 10 seconds between attempts.
+2. **Run `docker start <CONTAINER_NAME>`.** The script checks the command's exit status and retries 10 seconds apart, printing Docker's error each time.
 
-If either step still fails after 12 attempts, the script raises an error and stops.
+The number of attempts depends on when the restart happens:
+
+| When | Attempts per step | Longest wait for SSH | Longest wait for `docker start` |
+| --- | --- | --- | --- |
+| Before any reboot (the app is down, the server may be up) | 6 | About 2 minutes | About 1 minute |
+| After a reboot (the server is still booting) | 12 | About 4 minutes | About 2 minutes |
+
+If either step still fails after its attempts, the restart counts as failed. The script then escalates as shown above: a failed container restart leads to a reboot, and a failed restart after a reboot leads to the "MANUAL ACTION NEEDED" email.
+
+This also covers a down server that reports "no route to host" instead of timing out. That failure looks like a refused connection, so the script first tries a container restart. The SSH attempts run out, and it falls back to a reboot.
 
 ### Rebooting the server
 
@@ -30,7 +52,7 @@ After asking Linode to reboot the server, the script waits in two stages:
 
 ### Schedule
 
-The schedule is set at the bottom of [monitor-website.py](monitor-website.py). It is currently set to **every 2 minutes** for testing. The production schedule (every 2 days at 00:00 Europe/Warsaw time) is on the line above it, commented out.
+The schedule is set at the bottom of [monitor-website.py](monitor-website.py). The check runs every 2 days at 00:00 (Europe/Warsaw time).
 
 ## Requirements
 
@@ -103,8 +125,6 @@ pipenv run python monitor-website.py
 
 The script runs in the foreground and keeps running until you stop it. To keep it running after you close the terminal, start it with a process manager such as `systemd`, `tmux`/`screen`, or `nohup`.
 
-## Known limitations
-
-- **A stopped container triggers a full server reboot.** When the container is stopped, the server refuses the connection. The script treats any failed connection as "server down" and reboots, even when restarting the container would be enough.
-- **The HTTP check has no timeout.** If the server stops responding entirely, the request can hang for a long time before the script reacts.
-- **A failed restart stops the script.** If the SSH or `docker start` retries run out, the error is not caught, so monitoring stops until you start the script again.
+## Screenshots
+- monitor-website.py terminal output
+![monitor-website.py terminal output](https://res.cloudinary.com/dpav6x91z/image/upload/v1790592604/Screenshot_2026-09-28_122757_hsxlae.png)
