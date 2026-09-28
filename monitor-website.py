@@ -8,12 +8,24 @@ import time
 import schedule
 
 
-load_dotenv()
+load_dotenv(override=True)
 
 RECEIVER_EMAIL_ADD = os.getenv('RECEIVER_EMAIL_ADDRESS')
 EMAIL_ADD = os.getenv('EMAIL_ADDRESS')
 EMAIL_PWD = os.getenv('EMAIL_PASSWORD')
 LINODE_TOKEN = os.getenv('LINODE_TOKEN')
+LINODE_LABEL = os.getenv('LINODE_LABEL')
+CONTAINER_NAME = os.getenv('CONTAINER_NAME')
+APP_PORT = os.getenv('APP_PORT')
+SSH_USER = os.getenv('SSH_USER')
+SSH_KEY_PATH = os.getenv('SSH_KEY_PATH')
+
+linode_client = linode_api4.LinodeClient(LINODE_TOKEN)
+
+
+def get_server():
+    print(linode_client.linode.instances(linode_api4.Instance.label == LINODE_LABEL)[0])
+    return linode_client.linode.instances(linode_api4.Instance.label == LINODE_LABEL)[0]
 
 def send_notification(msg):
     with SMTP("smtp.gmail.com", 587) as smtp:
@@ -23,41 +35,57 @@ def send_notification(msg):
         smtp.sendmail(EMAIL_ADD, RECEIVER_EMAIL_ADD, msg)
 
 
-def restart_container():
+def restart_container(server_ip, attempts=12):
     ssh = paramiko.SSHClient()
     ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-    ssh.connect(hostname='172.104.132.102', username='root', key_filename='/home/oluwasade/.ssh/secureops_key')
-    
-    # come back to figure out how to dynamically get container id for the docker start command.
-    # stdin, stdout, stderr = ssh.exec_command('docker ps')
-    stdin, stdout, stderr = ssh.exec_command('docker start 6949cbbc8694')
-    print(stdout.readlines())
+    for _ in range(attempts):
+        try:
+            ssh.connect(hostname=server_ip, username=SSH_USER, key_filename=SSH_KEY_PATH, timeout=10)
+            break
+        except (OSError, paramiko.SSHException) as ex:
+            print(f"SSH not ready yet ({ex}), retrying in 10s...")
+            time.sleep(10)
+    else:
+        raise RuntimeError(f"Could not SSH into {server_ip} after {attempts} attempts")
+
+    # the Docker daemon can come up a few seconds after SSH on boot, so retry until docker start succeeds
+    for _ in range(attempts):
+        stdin, stdout, stderr = ssh.exec_command(f'docker start {CONTAINER_NAME}')
+        if stdout.channel.recv_exit_status() == 0:
+            print(f"Container {CONTAINER_NAME} started")
+            break
+        print(f"docker start failed ({stderr.read().decode().strip()}), retrying in 10s...")
+        time.sleep(10)
+    else:
+        ssh.close()
+        raise RuntimeError(f"Could not start container {CONTAINER_NAME} on {server_ip} after {attempts} attempts")
+
     ssh.close()
 
 
 def restart_server_and_container():
     print("Rebooting the server...")
-    client = linode_api4.LinodeClient(LINODE_TOKEN)
-    nginx_server = client.load(linode_api4.Instance, 105038890)
-    nginx_server.reboot()
-    
-    print('Server has been rebooted')
-    
-    # restart the application
-    while True:
-        nginx_server = client.load(linode_api4.Instance, 105038890)
-        if nginx_server.status == 'running':
-            time.sleep(8)
-            print("Restarting the application...")
-            
-            restart_container()
-            
-            print("Application has been restarted")
-            break
-        
+    server = get_server()
+    server.reboot()
+
+    # true while the server is preparing to shut down, turns false once running switches to rebooting
+    while linode_client.load(linode_api4.Instance, server.id).status == 'running':
+        time.sleep(2)
+    print("Server is rebooting...")
+
+    # true while the server has moved to the rebooting status
+    while linode_client.load(linode_api4.Instance, server.id).status != 'running':
+        time.sleep(5)
+    print("Server is back up, restarting the application...")
+
+    restart_container(server.ipv4[0])
+    print("Application has been restarted")
+
+
 def monitor_application():
+    server_ip = get_server().ipv4[0]
     try:
-        response = requests.get('http://172-104-132-102.ip.linodeusercontent.com:8080')
+        response = requests.get(f'http://{server_ip}:{APP_PORT}')
 
         if response.status_code == 200:
             print("Application is running successfully!")
@@ -70,7 +98,7 @@ def monitor_application():
             send_notification(msg)
             
             print("Restarting the app's container...")
-            restart_container()     
+            restart_container(server_ip)
             print("Application restarted")
             
     except Exception as ex:
@@ -79,11 +107,12 @@ def monitor_application():
         
         print("Sending email notification...")
         send_notification(msg)
-        
+
         # restart linode server
         restart_server_and_container()
         
-schedule.every(2).day.at("00:00", "Europe/Warsaw").do(monitor_application)
+# schedule.every(2).day.at("00:00", "Europe/Warsaw").do(monitor_application)
+schedule.every(2).minutes.do(monitor_application)
 
 while True:
     schedule.run_pending()
