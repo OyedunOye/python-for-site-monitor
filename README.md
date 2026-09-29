@@ -2,6 +2,9 @@
 
 A Python script that checks whether a web application running in a Docker container on a Linode server is up, emails you when it isn't, and tries to bring it back automatically.
 
+## Tech Stack
+Python, Linode, Docker, Linux
+
 ## How it works
 
 On a schedule, the script looks up the server's public IP address through the Linode API (using the server's label), sends an HTTP request to `http://<server-ip>:<APP_PORT>`, and acts on the result:
