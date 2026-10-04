@@ -9,6 +9,7 @@ python-dotenv = "*"
 paramiko = "*"
 linode-api4 = "*"
 schedule = "*"
+pytz = "*"
 
 [dev-packages]
 

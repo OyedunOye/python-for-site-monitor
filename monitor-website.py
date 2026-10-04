@@ -5,6 +5,7 @@ from dotenv import load_dotenv
 import paramiko
 import linode_api4
 import time
+import pytz
 import schedule
 
 
@@ -21,6 +22,8 @@ SSH_USER = os.getenv('SSH_USER')
 SSH_KEY_PATH = os.getenv('SSH_KEY_PATH')
 
 linode_client = linode_api4.LinodeClient(LINODE_TOKEN)
+
+warsaw = pytz.timezone("Europe/Warsaw")
 
 
 def get_server():
@@ -47,13 +50,13 @@ def restart_container(server_ip, attempts=12):
     else:
         raise RuntimeError(f"Could not SSH into {server_ip} after {attempts} attempts")
 
-    # the Docker daemon can come up a few seconds after SSH on boot, so retry until docker start succeeds
+    # the Docker daemon can come up a few seconds after SSH on boot, so retry until docker restart succeeds
     for _ in range(attempts):
-        stdin, stdout, stderr = ssh.exec_command(f'docker start {CONTAINER_NAME}')
+        stdin, stdout, stderr = ssh.exec_command(f'docker restart {CONTAINER_NAME}')
         if stdout.channel.recv_exit_status() == 0:
             print(f"Container {CONTAINER_NAME} started")
             break
-        print(f"docker start failed ({stderr.read().decode().strip()}), retrying in 10s...")
+        print(f"docker restart failed ({stderr.read().decode().strip()}), retrying in 10s...")
         time.sleep(10)
     else:
         ssh.close()
@@ -136,8 +139,12 @@ def monitor_application():
         print("Restarting the app's container...")
         restart_container_or_reboot(server_ip)
         
-schedule.every(2).day.at("00:00", "Europe/Warsaw").do(monitor_application)
+    except Exception as ex:
+        print(f"An error occured: {ex}")
+        
+schedule.every(2).days.at("00:00", warsaw).do(monitor_application)
 # schedule.every(2).minutes.do(monitor_application)
 
 while True:
+    time.sleep(1)
     schedule.run_pending()
